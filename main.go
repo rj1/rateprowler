@@ -120,22 +120,11 @@ func main() {
 
 				if err != nil || resp.StatusCode > 400 && resp.StatusCode < 500 {
 					// handle failed request
-					var errorMsg string
 					if err != nil {
-						errorMsg = fmt.Sprintf("[%s] - %s - %v\n", time.Now().Format("2006-01-02 15:04:05"), tester.URL, err)
+						// log error to database
+						db.Exec("INSERT INTO errors (name, type, error, timestamp) VALUES (?, ?, ?)", tester.Name, "sys", err, time.Now().Unix())
 					} else {
-						errorMsg = fmt.Sprintf("[%s] - %s - %v\n", time.Now().Format("2006-01-02 15:04:05"), tester.URL, resp.StatusCode)
-					}
-
-					// log error to file
-					f, err := os.OpenFile("error.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-					if err != nil {
-						fmt.Println(err)
-					}
-					defer f.Close()
-
-					if _, err := f.WriteString(errorMsg); err != nil {
-						fmt.Println(err)
+						db.Exec("INSERT INTO errors (name, type, status, timestamp) VALUES (?, ?, ?, ?)", tester.Name, "http", resp.StatusCode, time.Now().Unix())
 					}
 
 					if requestCount == 0 {
@@ -285,8 +274,20 @@ func databaseInit(dbname string) (*sql.DB, error) {
 			fail_time TEXT,
       last_wait_interval INTEGER,
 			timestamp INT
-		)
-	`)
+		)`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create table: %w", err)
+	}
+
+	_, err = db.Exec(`
+      CREATE TABLE IF NOT EXISTS errors (
+      id INTEGER PRIMARY KEY,
+      name TEXT,
+      type TEXT,
+      status INT,
+      error TEXT,
+      timestamp INT
+    )`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table: %w", err)
 	}
