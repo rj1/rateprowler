@@ -116,7 +116,9 @@ func main() {
 				time.Sleep(rate.waitTime())
 
 				// send request
-				resp, err := client.Get(tester.URL)
+        req, err := http.NewRequest("GET", tester.URL, nil)
+        req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
+        resp, err := client.Do(req)
 
 				if err != nil || resp.StatusCode > 400 && resp.StatusCode < 500 {
 					// handle failed request
