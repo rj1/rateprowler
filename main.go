@@ -1,9 +1,11 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
+	_ "github.com/mattn/go-sqlite3"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,12 +23,15 @@ type Tester struct {
 }
 
 type Result struct {
-	Endpoint          string
-	SuccessfulCount   int
-	ErrorCount        int
-	RequestsPerSecond float64
-	ErrorWait         time.Duration
-	SleepStatus       bool
+	Endpoint             string
+	SuccessfulCount      int
+	BatchSuccessfulCount int
+	ErrorCount           int
+	BatchErrorCount      int
+	RequestsPerSecond    float64
+	ErrorWait            time.Duration
+	SleepStatus          bool
+	TotalSuccessTime     time.Duration
 }
 
 func main() {
@@ -43,6 +48,8 @@ func main() {
 		fmt.Printf("error loading configuration: %v\n", err)
 		os.Exit(1)
 	}
+
+	db, err := databaseInit("rateprowler.db")
 
 	var results []*Result
 	var wg sync.WaitGroup
@@ -101,6 +108,8 @@ func main() {
 			errorWait := time.Duration(0)
 			lastError := time.Time{}
 
+			batchStartTime := time.Now()
+
 			for requestCount < tester.MaxRequests {
 				// wait for rate limit
 
@@ -135,11 +144,16 @@ func main() {
 					}
 
 					results[i].ErrorCount++
+					results[i].BatchErrorCount++
+
 					// wait using error wait intervals
 					if waitIndex < len(tester.ErrorWaitIntervals) {
 						errorWait = time.Duration(tester.ErrorWaitIntervals[waitIndex]) * time.Second
 						waitIndex++
 					}
+
+					results[i].TotalSuccessTime = time.Since(batchStartTime)
+					batchStartTime = time.Now()
 
 					// time of the last error
 					if lastError.IsZero() {
@@ -156,6 +170,7 @@ func main() {
 				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 					// handle successful request
 					results[i].SuccessfulCount++
+					results[i].BatchSuccessfulCount++
 					results[i].RequestsPerSecond = float64(results[i].SuccessfulCount) / time.Since(startTime).Seconds()
 
 					// reset wait interval
@@ -167,10 +182,28 @@ func main() {
 					if !lastError.IsZero() {
 						endError := time.Now()
 
-						// add the error wait to the results
-						results[i].ErrorWait = endError.Sub(lastError)
+						// how long did this batch run for
+						totalErrorWait := endError.Sub(lastError)
+
+						// how long did it spit errors?
+						results[i].ErrorWait = totalErrorWait
+
 						// reset the last error time
 						lastError = time.Time{}
+
+						// log batch
+						batch := Batch{
+							Name:             tester.Name,
+							Successes:        results[i].BatchSuccessfulCount,
+							SuccessTime:      results[i].TotalSuccessTime,
+							Failures:         results[i].BatchErrorCount,
+							FailTime:         totalErrorWait,
+							LastWaitInterval: tester.ErrorWaitIntervals[waitIndex],
+						}
+
+						logBatch(db, batch)
+						results[i].BatchErrorCount = 0
+						results[i].BatchSuccessfulCount = 0
 					}
 				}
 				requestCount++
@@ -234,4 +267,53 @@ type rateLimit struct {
 
 func (rl *rateLimit) waitTime() time.Duration {
 	return rl.interval / time.Duration(rl.limit)
+}
+
+func databaseInit(dbname string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", dbname)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS log (
+			id INTEGER PRIMARY KEY,
+      name TEXT,
+			successes INTEGER,
+			success_time TEXT,
+			failures INTEGER,
+			fail_time TEXT,
+      last_wait_interval INTEGER,
+			timestamp INT
+		)
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create table: %w", err)
+	}
+
+	return db, nil
+}
+
+type Batch struct {
+	Name             string
+	Successes        int
+	SuccessTime      time.Duration
+	Failures         int
+	FailTime         time.Duration
+	LastWaitInterval int
+}
+
+func logBatch(db *sql.DB, batch Batch) error {
+	// convert time.Duration to string
+	successTime := batch.SuccessTime.String()
+	failTime := batch.FailTime.String()
+	_, err := db.Exec(`
+		INSERT INTO log (name, successes, success_time, failures, fail_time, last_wait_interval, timestamp)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, batch.Name, batch.Successes, successTime, batch.Failures, failTime, batch.LastWaitInterval, time.Now().Unix())
+	if err != nil {
+		fmt.Printf("failed to log request: %s", err)
+	}
+
+	return nil
 }
